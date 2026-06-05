@@ -222,6 +222,7 @@ class LIBEROEval:
         eval_horizon: int = 600,
         act_type: str = "abs",
         num_episodes: int = 10,
+        num_tasks: Optional[int] = None,
         eval_freq: int = 10,  # reserved
         init_seed: int = 42,
     ) -> None:
@@ -230,6 +231,7 @@ class LIBEROEval:
         self.task_suite_list = [benchmark_dict[task]() for task in self.task_list]
         self.eval_horizon = eval_horizon
         self.num_episodes = num_episodes
+        self.num_tasks = num_tasks
         self.eval_freq = eval_freq
         self.init_seed = init_seed
         self.act_type = act_type
@@ -284,7 +286,7 @@ class LIBEROEval:
             f.write(json.dumps(metrics) + "\n")
 
     def _save_video(self, save_path: Path, images: List[np.ndarray], fps: int = 30) -> None:
-        imageio.mimsave(save_path.as_posix(), images, fps=fps)
+        imageio.mimsave(save_path.as_posix(), images, fps=fps, output_params=["-pix_fmt", "yuv420p"])
 
     def _rollout(self, task_suite, policy: ClientModel, task_id: int, ep: int) -> float:
         env, lang, obs = self._init_env(task_suite, task_id, ep)
@@ -321,7 +323,8 @@ class LIBEROEval:
 
         rews: List[float] = []
         for task_suite in self.task_suite_list:
-            for task_id in tqdm(range(len(task_suite.tasks)), desc="Evaluating tasks"):
+            n = len(task_suite.tasks) if self.num_tasks is None else min(self.num_tasks, len(task_suite.tasks))
+            for task_id in tqdm(range(n), desc="Evaluating tasks"):
                 for ep in range(self.num_episodes):
                     policy.reset()
                     rew = self._rollout(task_suite, policy, task_id, ep)
@@ -341,6 +344,7 @@ def eval_libero(
     agent: ClientModel,
     save_path: Path,
     num_episodes: int = 10,
+    num_tasks: Optional[int] = None,
     init_seed: int = 42,
     act_type: str = 'abs',
     task_suites: Iterable[str] = ("libero_goal", "libero_spatial", "libero_10"),
@@ -353,6 +357,7 @@ def eval_libero(
             eval_horizon=horizon,
             act_type=act_type,
             num_episodes=num_episodes,
+            num_tasks=num_tasks,
             init_seed=init_seed,
         )
         eval_rewards = evaluator.eval_episodes(agent, save_path=save_path)
@@ -384,6 +389,7 @@ if __name__ == "__main__":
     parser.add_argument("--task_suites", nargs='+', default=["libero_10", "libero_spatial", "libero_goal", "libero_object"],
                         help="Libero suites to evaluate")
     parser.add_argument("--eval_time", type=int, default=50, help="Episodes per task")
+    parser.add_argument("--num_tasks", type=int, default=None, help="Max tasks per suite (None = all)")
     parser.add_argument("--init_seed", type=int, default=42, help="Random seed")
     parser.add_argument("--act_type", type=str, default="abs", choices=["abs", "rel"], help="Action type")
 
@@ -442,6 +448,7 @@ if __name__ == "__main__":
             save_path=out_dir,
             init_seed=args.init_seed,
             num_episodes=args.eval_time,
+            num_tasks=args.num_tasks,
             task_suites=args.task_suites,
             act_type=args.act_type,
         )

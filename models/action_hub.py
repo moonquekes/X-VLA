@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 from typing import Iterable, Tuple, Dict, Type
+import os
 import torch
 import torch.nn as nn
 
@@ -135,17 +136,34 @@ class EE6DActionSpace(BaseActionSpace):
         g_losses = [self.bce(pred[:, :, gi], target[:, :, gi]) for gi in self.gripper_idx]
         gripper_loss = sum(g_losses) / len(self.gripper_idx) * self.GRIPPER_SCALE
 
-        # XYZ position
-        pos_loss = (
-            self.mse(pred[:, :, self.POS_IDX_1], target[:, :, self.POS_IDX_1]) +
-            self.mse(pred[:, :, self.POS_IDX_2], target[:, :, self.POS_IDX_2])
-        ) * self.XYZ_SCALE
+        # 抓取阶段加权（opt-in，env XVLA_GRASP_WEIGHT>0；默认 0 = 原均匀 MSE，不改变基线行为）：
+        # 从 target 左臂 grip(idx 9，已二值化) 推出"吸附开启"帧，并向前扩 K 帧(下探到接触)，
+        # 对这些接触帧的 pos/rot 误差乘 (1+gw)，归一化保持总体量级 → 逼模型把接触点学准。
+        gw = float(os.environ.get("XVLA_GRASP_WEIGHT", "0.0"))
+        if gw > 0.0:
+            K = int(os.environ.get("XVLA_GRASP_WIN", "4"))
+            grip = (target[:, :, self.gripper_idx[0]] > 0.5).float()  # [B,T]
+            w = grip.clone()
+            for k in range(1, K + 1):
+                w[:, :-k] = torch.maximum(w[:, :-k], grip[:, k:])
+            weight = 1.0 + gw * w
+            weight = weight / weight.mean().clamp_min(1e-6)
+            we = weight.unsqueeze(-1)  # [B,T,1]
 
-        # Rotation 6D
-        rot_loss = (
-            self.mse(pred[:, :, self.ROT_IDX_1], target[:, :, self.ROT_IDX_1]) +
-            self.mse(pred[:, :, self.ROT_IDX_2], target[:, :, self.ROT_IDX_2])
-        ) * self.ROT_SCALE
+            def _wmse(idx):
+                return ((pred[:, :, idx] - target[:, :, idx]).pow(2) * we).mean()
+
+            pos_loss = (_wmse(self.POS_IDX_1) + _wmse(self.POS_IDX_2)) * self.XYZ_SCALE
+            rot_loss = (_wmse(self.ROT_IDX_1) + _wmse(self.ROT_IDX_2)) * self.ROT_SCALE
+        else:
+            pos_loss = (
+                self.mse(pred[:, :, self.POS_IDX_1], target[:, :, self.POS_IDX_1]) +
+                self.mse(pred[:, :, self.POS_IDX_2], target[:, :, self.POS_IDX_2])
+            ) * self.XYZ_SCALE
+            rot_loss = (
+                self.mse(pred[:, :, self.ROT_IDX_1], target[:, :, self.ROT_IDX_1]) +
+                self.mse(pred[:, :, self.ROT_IDX_2], target[:, :, self.ROT_IDX_2])
+            ) * self.ROT_SCALE
 
         return {
             "position_loss": pos_loss,

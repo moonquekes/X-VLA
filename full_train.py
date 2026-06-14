@@ -1,17 +1,7 @@
 # ------------------------------------------------------------------------------
-# Copyright 2025 2toINF (https://github.com/2toINF)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# Full-parameter fine-tuning variant of peft_train.py (no LoRA wrap).
+# Kept byte-identical to peft_train.py except: no peft import / get_peft_model,
+# and checkpoints are full XVLA model dirs loadable by deploy.py --model_path.
 # ------------------------------------------------------------------------------
 
 import os
@@ -32,7 +22,6 @@ from accelerate import Accelerator
 from datasets import create_dataloader
 from models.modeling_xvla import XVLA
 from models.processing_xvla import XVLAProcessor
-from peft import LoraConfig, get_peft_model
 
 
 
@@ -46,7 +35,7 @@ import sys
 def get_logger(name="train", output_dir=None, accelerator=None, level=logging.INFO):
     logger = logging.getLogger(name)
     logger.setLevel(level)
-    logger.propagate = False 
+    logger.propagate = False
     if logger.handlers:
         return logger
     is_main = accelerator is None or accelerator.is_main_process
@@ -132,7 +121,7 @@ def build_optimizer(model: XVLA, lr: float, weight_decay: float, betas=(0.9, 0.9
 
 
 def set_group_lr(optim: torch.optim.Optimizer, name: str, lr: float):
-    for g in optim.param_groups: 
+    for g in optim.param_groups:
         if g["name"] == name: g["lr"] = lr
 
 
@@ -155,11 +144,8 @@ def linear_warmup_cosine(step, start, warmup, total, base_lr, min_ratio):
 
 def update_group_lrs(optim, step, args):
     """Elegant group-wise LR scheduler."""
-    # XVLA_VLM_LR_COEF<1 → VLM(LoRA adapter)慢训，保住 Florence2 预训练语言接地，
-    # 把 adapter 容量腾给动作头修执行欠冲（默认 1.0 = 原行为，不影响历轮）。
-    vlm_coef = float(os.environ.get("XVLA_VLM_LR_COEF", "1.0"))
     base = {
-        "vlm": args.learning_rate * args.learning_coef * vlm_coef,
+        "vlm": args.learning_rate * args.learning_coef,
         "transformer_core": args.learning_rate,
         "soft_prompts": args.learning_rate * args.learning_coef,
         "action_heads": args.learning_rate,
@@ -183,33 +169,23 @@ def update_group_lrs(optim, step, args):
 def main(args):
     output_dir = Path(args.output_dir)
     accelerator = Accelerator(
-        log_with="tensorboard", 
+        log_with="tensorboard",
         project_dir=output_dir
     )
     accelerator.init_trackers("XVLA-Training")
-    
+
     accelerator.wait_for_everyone()
     logger = get_logger(__name__, output_dir=output_dir, accelerator=accelerator)
-    
+
     set_seed(args.seed + accelerator.process_index)
     logger.info(f"Args: {args}")
 
-    # Load model & processor
+    # Load model & processor (full fine-tune: all params trainable, no LoRA)
     model = XVLA.from_pretrained(args.models)
-    
-    lora_config = LoraConfig(
-        lora_alpha=16,
-        r=8,
-        bias="none",
-        target_modules="all-linear",
-        modules_to_save=["transformer.soft_prompt_hub", 
-                         "transformer.action_encoder", 
-                         "transformer.action_decoder"],
-    )
-    model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
-    
-    
+    n_total = sum(p.numel() for p in model.parameters())
+    n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    logger.info(f"Full fine-tune: trainable params {n_train:,} / {n_total:,} ({100.0 * n_train / n_total:.2f}%)")
+
     processor = XVLAProcessor.from_pretrained(args.models)
 
     # Iterable dataloader (don't wrap with prepare)
@@ -236,9 +212,9 @@ def main(args):
     model.train()
     global_step, t0 = 0, time.time()
     logger.info(f"🚀 Start training for {args.iters} iterations | world_size={accelerator.num_processes}")
-    
-    
-    
+
+
+
     for batch in train_dataloader:
         # Encode language
         lang = processor.encode_language(batch["language_instruction"])
@@ -273,7 +249,7 @@ def main(args):
                     f"lr_core={logs['lr_transformer_core']:.2e} "
                     f"lr_vlm={logs['lr_vlm']:.2e} ({dt:.2f}s/it)"
                 )
-        
+
         # Checkpointing
         global_step += 1
         if accelerator.is_main_process:
@@ -283,7 +259,7 @@ def main(args):
                 accelerator.unwrap_model(model).save_pretrained(save_dir, safe_serialization=True)
                 with open(os.path.join(save_dir, "state.json"), "w") as f:
                     json.dump({"global_step": global_step}, f)
-        
+
         if global_step >= args.iters: break
 
     accelerator.end_training()
@@ -292,7 +268,7 @@ def main(args):
 # Entry
 # ============================================================
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser("XVLA training script", parents=[get_args_parser()])
+    parser = argparse.ArgumentParser("XVLA full fine-tuning script", parents=[get_args_parser()])
     args = parser.parse_args()
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)

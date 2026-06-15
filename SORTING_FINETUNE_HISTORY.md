@@ -187,9 +187,10 @@ r9 宣告"系统天花板"后,把残留重新定性为**语言 grounding 问题*
 | `mk_meta_r{3..14}.py` | 各代均衡 meta 生成 | 定义每轮数据集组成/加权 |
 | `create_dataset.py` / `raw2xvla.py` / `audit_*.py` / `deploy_lora.sh` / `eval_*.sh` | 数据转换/打包/审计/部署/批量评测管线 | 端到端流水线 |
 
-**⚠ 同步状态(重要)**:
-- ✅ X-VLA 模型代码已 push 到 `moonquekes/X-VLA`。
-- ❌ **LIBERO 侧未同步**:`moonquekes/LIBERO` 的 master **领先远端 17 个提交未 push**;且 env 改动 + 上面所有采集/评测脚本(`eval_sorting_diag.py`、`scripted_collect_triples.py`、全部 `mk_meta_*`、`eval_*.sh`、`audit_*` 等)**仍是未跟踪/未提交状态——丢机器就没了**。强烈建议尽快 commit + push `moonquekes/LIBERO`。
+**同步状态**(2026-06-16 已全部同步):
+- ✅ X-VLA 模型代码 → `moonquekes/X-VLA` 分支 `sorting-finetune-conclusion`。
+- ✅ LIBERO env + 全部采集/评测/打包/meta 脚本 + 任务 BDDL → `moonquekes/LIBERO` master(4 个整理后的提交:gitignore 排除备份/输出/会话助手 → BDDL → 核心数据管线 → 评测/run/诊断/文档)。`.gitignore` 已排除 `data/`(28G 数据集)、`*.bak`、`eval_r2/`、本会话 orchestration 助手。
+- **WSL→github 网络坑**:WSL 里 `git push` 反复 SSL 超时;改用 **Windows git 操作 WSL 仓库**(`git -C \\wsl.localhost\…\libero push`,先 `safe.directory` 再 `-c http.version=HTTP/1.1 -c http.postBuffer=…` 绕过 curl 52 连接重置)推送成功。
 
 ## 基建经验(详见 skill `remote-bg-task`)
 

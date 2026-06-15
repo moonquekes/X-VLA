@@ -136,6 +136,61 @@ r9 宣告"系统天花板"后,把残留重新定性为**语言 grounding 问题*
 | 关键脚本 | `scripts/`:eval_sorting_diag.py(诊断评测,带 `--terminal_descent`)、scripted_expert_collect.py(脚本专家,r8 起带随机化)、scripted_collect_triples.py(反事实配对采集 r12/r13)、selfcollect_rollout.py(策略自采)、probe_swap_layouts.py(换位排布校验)、audit_success.py / audit_terminal_profile.py(审计)、raw2xvla.py(打包)、mk_meta_r{4..14}.py(均衡 meta;r12/r13 反事实、r14 swap 加权)、deploy_lora.sh / eval_one.sh / run_r*_pipeline.sh(管线);仓库根 `run_train_h100.sh`/`run_train_r14.sh`、peft_train.py 的 `XVLA_RESUME_LORA` 热启动开关 |
 | 复现路径 | 数据+脚本齐全,任何一轮可重训(打包→meta→`run_train_*.sh`→deploy→eval,端到端 ~1.5h);**r14 复现 = `XVLA_RESUME_LORA=…/r12cf/ckpt-7500 bash run_train_r14.sh` → 评测带 `--terminal_descent`** |
 
+## 数据集说明(组成 / 命名 / 大小 / 备份)
+
+**各轮数据集不一样**:底层 raw demo 池随轮次累积,每轮训练用一份不同的 meta(datalist)从池里挑选 + 复制加权出子集。
+
+### 底层数据池 `raw_hdf5`(不可再生的"金子")
+- **44 个目录、约 885 条 demo、477MB**。每条 = `states[N,134] + actions[N,7] + model_file`(bddl 内容)。这是**唯一不可离线重生**的部分(图像/绝对动作可由它 + env 重放生成)。
+- 命名 `{形状}_{框}[_变体]`,三形状框固定:`rectangular_red_bin` / `round_blue_bin` / `triangular_yellow_bin`。变体后缀:
+  - 无后缀 = 默认布局 D(人工 + 脚本专家)
+  - `_swap0/1/2` = 换位布局 P/Q/R(B 模式任务)
+  - `_selfc4/8/8b` = 策略自采(rollout 自蒸馏)
+  - `_div`(r8 多样性) / `_d9div`(r9 几何多样+速度冻结) / `_swNdiv`、`_swNselfc8`(换位层变体)
+  - `_cf` = 反事实配对在 D 层(r12);`_cfP/cfQ/cfR` = 反事实配对在 P/Q/R 层(r13)
+  - **怼穿式重采**(r5press 翻盘):把 base/selfc 目录以"下压 plate−3cm"重采,覆盖旧的零余量版本——这是 r5 跳到 86.7% 的关键数据修复。
+- 不同轮可能共用同一批 raw 目录,差别在 meta 选哪些 + 各自均衡到多少条。
+
+### 打包产物 `xvla_hdf5`(可再生)
+- 44 目录、**12GB**(含双目 256×256 图像,JPEG vlen)。由 `raw2xvla.py` 从 raw 重打,丢了能重生。
+
+### 各代 meta(= 每轮"数据集组成"的定义)
+13 份 `sorting_meta_*.json`,条数=该轮 datalist 长度(含复制过采样):r2 150 / r2bal 165 / r3bal 237 / r4bal 365 / **r5press 365** / r6 368 / r7 432 / r8 300 / r9 368 / r10 365 / **r12 455** / r13 600 / **r14 360**。
+
+### 备份建议(Google Drive 完全可行)
+按优先级:
+1. **`raw_hdf5/`(477MB,必备、不可再生)+ 13 份 meta + 自定义 BDDL** → `tar czf raw_backup.tgz raw_hdf5 sorting_meta_*.json` 后传 Google Drive(手动或 WSL 装 `rclone` 直传)。
+2. **代码**(采集/评测脚本 + env)→ 进 GitHub 版本控制(见下,**目前大量未提交**)。
+3. `xvla_hdf5/`(12G)可选——丢了能由 raw 重打,省空间可不备。整个数据根 28GB(含评测视频)按需。
+
+## 代码改动清单(改了什么 / 为什么 / 同步状态)
+
+代码分**两个仓库 + 一处 env**。
+
+### X-VLA(`moonquekes/X-VLA`,模型/训练 —— ✅ 已推送分支 `sorting-finetune-conclusion`)
+| 文件 | 改动 | 为什么 |
+|---|---|---|
+| `peft_train.py` | 加 `XVLA_VLM_LR_COEF` env(缩放 VLM 子层 lr) | r11:压 VLM lr 想"保底座"——**证伪**(欠适配崩) |
+| `peft_train.py` | 加 `XVLA_RESUME_LORA` env(`PeftModel.from_pretrained(is_trainable=True)`) | **r14:热启动定向修补——制胜旋钮** |
+| `models/action_hub.py` | 加 `XVLA_GRASP_WEIGHT/_WIN`(接触帧 pos/rot 损失加权,默认关) | 试"加权接触点修欠冲"——**实测无增益**(劣质 demo 加权=更忠实复现错误) |
+| `full_train.py`(新) | 去 LoRA 包装的全参微调脚本 | r4full 容量对照(证明 LoRA 低秩=保识别正则) |
+| `evaluation/libero/raw2xvla.py` | 打包改进 | noop 过滤 / 图像 JPEG vlen / abs-action 标记 / 并行 tmp 带 pid 防互覆盖 |
+
+### LIBERO(`moonquekes/LIBERO`,env + 采集/评测脚本)
+| 文件 | 改动 | 为什么 |
+|---|---|---|
+| env `turbosquid_objects.py` + BDDL `:init` | 三角放大 1.15、槽宽 2→8cm(**槽心不动**) | r1/r2 修工件穿透 + 反直觉散布(槽越窄散布越宽,数值反转) |
+| custom BDDL | 3 base + 6 swap + diag4cm/diagwide 变体 | 任务定义(换位反"背槽位")+ 分布失配诊断实验 |
+| `scripted_expert_collect.py` | 脚本专家采集器 + 怼穿下压 + 多样性随机化开关 | r4 脚本专家(零成本原题);**r5 怼穿修欠冲**;r8/r9 多样性(`SE_SPEED_JITTER`) |
+| `scripted_collect_triples.py`(新) | 反事实配对采集(同 np 种子→同画面分别抓三形状) | r12/r13 逼模型读语言消歧 |
+| `eval_sorting_diag.py` | 诊断评测 + 失败归因码 + `--terminal_descent` | 失败分类(抓错 vs 欠冲);末端下压既修欠冲又当判别探针 |
+| `mk_meta_r{3..14}.py` | 各代均衡 meta 生成 | 定义每轮数据集组成/加权 |
+| `create_dataset.py` / `raw2xvla.py` / `audit_*.py` / `deploy_lora.sh` / `eval_*.sh` | 数据转换/打包/审计/部署/批量评测管线 | 端到端流水线 |
+
+**⚠ 同步状态(重要)**:
+- ✅ X-VLA 模型代码已 push 到 `moonquekes/X-VLA`。
+- ❌ **LIBERO 侧未同步**:`moonquekes/LIBERO` 的 master **领先远端 17 个提交未 push**;且 env 改动 + 上面所有采集/评测脚本(`eval_sorting_diag.py`、`scripted_collect_triples.py`、全部 `mk_meta_*`、`eval_*.sh`、`audit_*` 等)**仍是未跟踪/未提交状态——丢机器就没了**。强烈建议尽快 commit + push `moonquekes/LIBERO`。
+
 ## 基建经验(详见 skill `remote-bg-task`)
 
 ssh 发射的 `&` 包裹规则与 **pkill 自杀坑**(模式串出现在本命令任何位置都会杀父壳→exit 255/9,kill 与发射分开两条 ssh、用 `[d]eploy` 中括号);**≤1h 要"完成唤醒我"的 WSL 长任务首选 Bash 工具 `run_in_background`**(harness 跨轮保活、退出主动通知;Start-Process/nohup+disown 都可能被 WSL 会话拆除连坐杀掉,只留给必须过夜的脱离);**别高频新建 ssh 轮询远端→触发 fail2ban 临时封禁**(症状:ssh 秒返 `Connection closed by … port` 但 TCP 通;等远端用本地 done 文件 `Test-Path` 或单条长连接哨兵);端口隧道走 Windows 侧(mirrored 共享 localhost;隧道会在远端连接抖动时被 `ExitOnForwardFailure` 自退,掉了重建即可);**监视器生命周期=会话生命周期**(过夜不指望通知,done 文件为唯一真相,管线断点可续);PowerShell 转义/中文路径陷阱 → 复杂命令一律写脚本文件;评测渲染集显快于 4090(D3D12 翻译层开销);WSL 12GB 内存上限 → 打包最多 3 路并行。详见 skill `remote-bg-task`。

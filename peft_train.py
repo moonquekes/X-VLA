@@ -206,7 +206,15 @@ def main(args):
                          "transformer.action_encoder", 
                          "transformer.action_decoder"],
     )
-    model = get_peft_model(model, lora_config)
+    # XVLA_RESUME_LORA=<ckpt 路径> → 从已有 LoRA adapter 热启动继续训练（定向修补，
+    # 锁住已攻破的能力只温和扰动；默认空=原行为，从 base 全新初始化 LoRA）。
+    resume_lora = os.environ.get("XVLA_RESUME_LORA", "")
+    if resume_lora:
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, resume_lora, is_trainable=True)
+        logger.info(f"WARM-START 继续训练自 LoRA adapter: {resume_lora}")
+    else:
+        model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
     
     
